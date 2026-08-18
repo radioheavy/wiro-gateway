@@ -1,0 +1,194 @@
+Metadata-Version: 2.4
+Name: wiro-gateway
+Version: 0.1.0
+Summary: Local terminal gateway that lets Claude Code / Codex use Wiro's Qwen3.8-27B-Uncensored via OpenAI or Anthropic compatible APIs.
+Author: Oktay
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn[standard]>=0.27
+Requires-Dist: httpx>=0.27
+Requires-Dist: pydantic>=2.6
+Requires-Dist: pydantic-settings>=2.2
+Requires-Dist: typer>=0.12
+Requires-Dist: websockets>=12
+Requires-Dist: rich>=13.7
+Requires-Dist: python-dotenv>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+
+# wiro-gateway
+
+A small local terminal gateway that lets **Claude Code** and **Codex** use
+[`qwen/qwen3-8-27b-uncensored`](https://wiro.ai/models/qwen/qwen3-8-27b-uncensored)
+— the open-source 27B Qwen 3.8 model hosted on [Wiro](https://wiro.ai) — as a
+drop-in backend. The gateway speaks **OpenAI Chat Completions** and
+**Anthropic Messages** on localhost, and translates each request into a Wiro
+`Run` task that polls `Task/Detail` until the model finishes.
+
+```
+┌──────────────┐     OpenAI / Anthropic     ┌──────────────────┐   HMAC + form   ┌────────────┐
+│  Codex CLI   │ ─────────────────────────▶ │  wiro-gateway    │ ──────────────▶ │  Wiro API  │
+│  Claude Code │ ◀─── non-streaming JSON ─── │  (127.0.0.1)     │ ◀─ task/poll ── │  Qwen3.8   │
+└──────────────┘                            └──────────────────┘                 └────────────┘
+```
+
+## What you get
+
+- `wiro-gateway init` — interactive setup that writes a `.env` with your Wiro
+  API key + secret (chmod 600).
+- `wiro-gateway doctor` — verifies credentials by issuing a tiny `Run` call.
+- `wiro-gateway start` — boots the FastAPI server on `127.0.0.1:8765` (configurable).
+- `wiro-gateway printenv` — prints the env vars Codex / Claude Code need.
+- 19 unit tests cover auth, output extraction, message merging, and end-to-end
+  HTTP for both API surfaces (no network needed).
+
+The model is Qwen 3.8 27B uncensored, 262k context, Bf16, with optional
+thinking mode. Wiro docs recommend `temp 0.7, top_p 0.80, top_k 20` for chat
+and `temp 1.0, top_p 0.95, top_k 20` for reasoning — the gateway ships with the
+chat defaults and lets you override via the request body (`temperature`,
+`top_p`, `top_k`, `max_tokens`, `stop` / `stop_sequences`).
+
+## Install
+
+```bash
+cd ~/Masaüstü/wiro-gateway
+python3 -m venv .venv && source .venv/bin/activate   # optional but recommended
+pip install -e .
+wiro-gateway --help
+```
+
+System Python works too — `pip install -e .` already added the `wiro-gateway`
+script to `~/.local/bin`.
+
+## First-time setup
+
+1. Sign up at [wiro.ai](https://wiro.ai) and create a **Signature-Based**
+   project under *Dashboard → Projects*. Copy the API key and secret.
+2. From the project folder, run:
+
+   ```bash
+   wiro-gateway init
+   ```
+   It will prompt for the key + secret and write a `.env` next to your shell.
+
+3. Verify the connection:
+
+   ```bash
+   wiro-gateway doctor
+   ```
+   You should see `Credentials: ok` and `Wiro Run: ok`.
+
+4. Start the gateway:
+
+   ```bash
+   wiro-gateway start
+   # → http://127.0.0.1:8765
+   ```
+
+## Use it from Codex
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8765/v1
+export OPENAI_API_KEY=wiro
+codex "refactor src/foo.py"
+```
+
+Or source the helper:
+
+```bash
+. examples/codex.sh
+codex "write a pytest for src/foo.py"
+```
+
+## Use it from Claude Code
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8765
+export ANTHROPIC_AUTH_TOKEN=wiro
+claude "explain this repo"
+```
+
+Or:
+
+```bash
+. examples/claude-code.sh
+claude "add type hints to utils.py"
+```
+
+## Endpoints
+
+| Method | Path                  | Purpose                                       |
+|--------|-----------------------|-----------------------------------------------|
+| GET    | `/`                   | Service info                                  |
+| GET    | `/healthz`            | Liveness probe                                |
+| GET    | `/v1/models`          | OpenAI-style model list (Qwen + alias)        |
+| POST   | `/v1/chat/completions`| OpenAI Chat Completions (non-streaming)       |
+| POST   | `/v1/messages`        | Anthropic Messages (non-streaming)            |
+
+The gateway runs requests synchronously: it calls `Run/<model>`, then polls
+`Task/Detail` every `WIRO_POLL_INTERVAL_SEC` (default 1 s) until status is
+`task_postprocess_end` (or one of the terminal failure statuses). The full
+timeout is `WIRO_POLL_TIMEOUT_SEC` (default 600 s).
+
+Streaming is **not** implemented in v0.1.0 — Codex/Claude Code both fall back
+to non-streaming when the server does not advertise it, and that keeps the
+gateway simple. Wiro does not stream LLM tokens incrementally, so a streaming
+emulation would only be cosmetic.
+
+## How output is extracted
+
+Wiro's docs only show an image-to-image example whose `outputs[]` has a `url`.
+LLM tasks are different: the assistant text usually lands in
+`tasklist[0].debugoutput`, or in `outputs[].content` (sometimes as JSON), or
+in `outputs[].text`, or as a text CDN file behind `outputs[].url`. The
+`extract.py` module walks these shapes defensively and raises a clear error if
+nothing matches.
+
+## Project layout
+
+```
+wiro-gateway/
+├── pyproject.toml
+├── .env.example
+├── README.md
+├── wiro_gateway/
+│   ├── __init__.py
+│   ├── __main__.py        # `python -m wiro_gateway`
+│   ├── cli.py             # typer CLI: init / doctor / start / printenv
+│   ├── config.py          # pydantic settings + .env loading
+│   ├── auth.py            # HMAC-SHA256 signing
+│   ├── client.py          # async Wiro Run + Task/Detail + polling
+│   ├── extract.py         # robust assistant-text extractor
+│   ├── wiro_to_params.py  # OpenAI/Anthropic messages -> Wiro prompt+system
+│   ├── openai_compat.py   # /v1/chat/completions, /v1/models
+│   ├── anthropic_compat.py# /v1/messages
+│   └── server.py          # FastAPI app factory + lifespan
+├── tests/                 # 19 pytest cases, all offline
+└── examples/
+    ├── codex.sh
+    └── claude-code.sh
+```
+
+## Tests
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+19 cases: auth signature matches the Wiro formula, auth headers have the
+documented shape, output extraction covers every documented field plus an
+unknown-shape error path, message merging handles multi-turn + system prompts
++ empty fallback, and the HTTP layer is exercised end-to-end with a fake
+`WiroClient` (no network).
+
+## Security notes
+
+- `.env` is created with `chmod 600` automatically; never commit it.
+- The gateway listens on `127.0.0.1` by default. Don't expose it to the
+  internet — your Wiro secret would leak.
+- The gateway accepts **any** `OPENAI_API_KEY` / `ANTHROPIC_AUTH_TOKEN` because
+  it's a local single-user tool. If you need multi-tenant safety, add token
+  verification in `server.py`.

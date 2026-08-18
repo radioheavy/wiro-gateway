@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# qwen-codex: run `codex --profile wiro` so it talks to wiro-gateway (Qwen3.8-27B).
+# The "wiro" profile is defined in ~/.codex/config.toml (created by install-wrappers.sh).
+# Auto-starts the gateway if it is not up.
+set -euo pipefail
+
+GW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+HOST="${GATEWAY_HOST:-127.0.0.1}"
+PORT="${GATEWAY_PORT:-8765}"
+HEALTH="http://${HOST}:${PORT}/healthz"
+
+if ! command -v codex > /dev/null 2>&1; then
+  echo "[qwen-codex] ERROR: 'codex' (Codex CLI) is not on PATH." >&2
+  exit 1
+fi
+
+if ! curl -sS -m 1 "$HEALTH" > /dev/null 2>&1; then
+  if command -v systemctl > /dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/wiro-gateway.service" ]; then
+    echo "[qwen-codex] gateway not up, starting systemd service..."
+    systemctl --user start wiro-gateway.service || {
+      echo "[qwen-codex] systemctl start failed. Run: $GW_DIR/bin/install-systemd.sh" >&2
+      exit 1
+    }
+    for i in $(seq 1 30); do curl -sS -m 1 "$HEALTH" > /dev/null 2>&1 && break; sleep 0.5; done
+  else
+    echo "[qwen-codex] gateway not running. Run: $GW_DIR/bin/install-systemd.sh" >&2
+    exit 1
+  fi
+fi
+
+if ! curl -sS -m 1 "$HEALTH" > /dev/null 2>&1; then
+  echo "[qwen-codex] gateway did not come up. tail -f /tmp/wiro-gateway.log" >&2
+  exit 1
+fi
+
+# Belt-and-suspenders: also export OPENAI_* so anything bypassing --profile still hits us.
+export OPENAI_BASE_URL="http://${HOST}:${PORT}/v1"
+export OPENAI_API_KEY="wiro"
+
+echo "[qwen-codex] gateway $HEALTH  model=qwen/qwen3-8-27b-uncensored"
+echo "[qwen-codex] launching codex --profile wiro...  (Ctrl+C to exit)"
+exec codex --profile wiro "$@"

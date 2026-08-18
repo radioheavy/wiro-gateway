@@ -1,0 +1,2 @@
+[console_scripts]
+wiro-gateway = wiro_gateway.cli:app

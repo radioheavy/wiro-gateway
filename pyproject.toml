@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wiro-gateway"
+version = "0.1.0"
+description = "Local terminal gateway that lets Claude Code / Codex use Wiro's Qwen3.8-27B-Uncensored via OpenAI or Anthropic compatible APIs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Oktay" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "websockets>=12",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+wiro-gateway = "wiro_gateway.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["wiro_gateway*"]
