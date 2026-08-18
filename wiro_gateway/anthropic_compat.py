@@ -10,6 +10,13 @@ Schema is the minimum Claude Code actually sends:
   - system: str | [{type, text}, ...]   (top-level, not in messages)
   - max_tokens: int
   - temperature, top_p, top_k, stop_sequences
+  - thinking: { type: "enabled" | "disabled", budget_tokens?: int }
+
+Reasoning effort is read from:
+  - `body["thinking"]["type"]`            (Claude Code native: "enabled" / "adaptive")
+  - `body["thinking"]["effort"]`          (Codex-shaped client)
+  - `body["reasoning"]["effort"]`         (Codex Responses shared shape)
+  - `body["reasoning_effort"]`            (OpenAI flat form)
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .extract import extract_assistant_text
+from .reasoning import PRESETS, EffortLevel, apply_preset_to_wiro_params, resolve_effort
 from .wiro_to_params import merge_messages
 
 router = APIRouter()
@@ -50,8 +58,13 @@ def _system_to_string(system: Any) -> str:
     return str(system)
 
 
-def _anthropic_response(model: str, text: str, stop_reason: str = "end_turn") -> dict[str, Any]:
-    return {
+def _anthropic_response(
+    model: str,
+    text: str,
+    stop_reason: str = "end_turn",
+    effort: EffortLevel | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "id": f"msg_{uuid.uuid4().hex}",
         "type": "message",
         "role": "assistant",
@@ -64,6 +77,13 @@ def _anthropic_response(model: str, text: str, stop_reason: str = "end_turn") ->
             "output_tokens": max(1, len(text) // 4),
         },
     }
+    if effort is not None:
+        body["x_wiro"] = {
+            "effort": effort,
+            "enable_thinking": PRESETS[effort].enable_thinking,
+            "reasoning_effort": PRESETS[effort].reasoning_effort,
+        }
+    return body
 
 
 @router.post("/v1/messages")
@@ -82,16 +102,20 @@ async def messages(request: Request) -> JSONResponse:
 
     system = _system_to_string(body.get("system"))
     model = body.get("model") or settings.wiro_model
-    max_tokens = int(body.get("max_tokens") or DEFAULT_MAX_TOKENS)
-    temperature = float(body.get("temperature", DEFAULT_TEMPERATURE))
-    top_p = float(body.get("top_p", DEFAULT_TOP_P))
-    top_k = int(body.get("top_k", DEFAULT_TOP_K))
+
+    effort = resolve_effort(body, settings.wiro_default_reasoning_effort)
+    preset = PRESETS[effort]
+    override = settings.wiro_preset_overrides_sampling
+
+    max_tokens = int(body.get("max_tokens") or (preset.max_tokens if override else DEFAULT_MAX_TOKENS))
+    temperature = float(body.get("temperature", preset.temperature if override else DEFAULT_TEMPERATURE))
+    top_p = float(body.get("top_p", preset.top_p if override else DEFAULT_TOP_P))
+    top_k = int(body.get("top_k", preset.top_k if override else DEFAULT_TOP_K))
     stop = body.get("stop_sequences")
 
     merged = merge_messages(messages_in, system)
     system_prompt, prompt = merged
-    wiro_params = {
-        "enableThinking": "false",
+    wiro_params: dict[str, Any] = {
         "prompt": prompt,
         "system_prompt": system_prompt or "",
         "temperature": str(temperature),
@@ -105,6 +129,7 @@ async def messages(request: Request) -> JSONResponse:
         "seed": "0",
         "do_sample": "--do_sample",
     }
+    wiro_params = apply_preset_to_wiro_params(wiro_params, preset, override_sampling=override)
 
     try:
         payload = await client.run_until_done(settings.wiro_model, wiro_params)
@@ -116,4 +141,4 @@ async def messages(request: Request) -> JSONResponse:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not extract assistant text: {exc}")
 
-    return JSONResponse(_anthropic_response(model, text))
+    return JSONResponse(_anthropic_response(model, text, effort=effort))

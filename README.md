@@ -121,6 +121,8 @@ GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=8765
 WIRO_POLL_INTERVAL_SEC=1.0
 WIRO_POLL_TIMEOUT_SEC=600
+WIRO_DEFAULT_REASONING_EFFORT=none            # none | low | medium | high
+WIRO_PRESET_OVERRIDES_SAMPLING=true           # preset wins over request body
 ```
 
 You can also override at request time (per Codex prompt) by setting these envs
@@ -133,6 +135,69 @@ defaults and are passed through to Wiro:
 | `top_p`                 | `top_p`             | 0.8            |
 | `top_k`                 | `top_k`             | 20             |
 | `max_output_tokens`     | `max_tokens`        | 4096           |
+
+## Reasoning effort (Wiro Qwen 3.8 27B)
+
+The Wiro Qwen 3.8 27B Uncensored backend supports a `reasoning_effort` form
+field (low / medium / high) plus an `enableThinking` toggle — together they
+control how much chain-of-thought the model produces. The gateway maps every
+client request into a Wiro preset so the answer quality matches the Wiro model
+page:
+
+| Effort   | `enableThinking` | `reasoning_effort` | temp / top_p / top_k | max_tokens | Use it for                                   |
+|----------|------------------|--------------------|-----------------------|------------|----------------------------------------------|
+| `none`   | `false`          | _(omitted)_        | 0.7 / 0.8 / 20        | 4096       | Snappy Q&A, autocompletes, no thinking       |
+| `low`    | `true`           | `low`              | 0.6 / 0.95 / 20       | 8192       | Quick checks, small refactors                |
+| `medium` | `true`           | `medium`           | 0.6 / 0.95 / 20       | 12288      | Multi-step edits, debugging, plan + implement|
+| `high`   | `true`           | `high`             | 0.6 / 0.95 / 20       | 16384      | Architecture, hard bugs, long planning       |
+
+### How the request is parsed
+
+The gateway reads the requested effort from (first hit wins):
+
+1. `body["reasoning"]["effort"]` — Codex Responses / OpenAI Responses shape.
+2. `body["reasoning_effort"]` — flat OpenAI Chat Completions shape.
+3. `body["thinking"]` — Claude Code shape (`type: "enabled" | "disabled" | "adaptive"`).
+4. `body["reasoning_effort_level"]` — rare client variant.
+
+Allowed values (aliases in parentheses): `none` (`off`, `disabled`),
+`low` (`minimal`), `medium` (`med`), `high` (`max`, `maximum`). Anything
+unrecognised falls back to `none` instead of 400ing.
+
+### Per-request override vs. gateway default
+
+The gateway default is `WIRO_DEFAULT_REASONING_EFFORT` in `.env` (default
+`none`, preserves v0.1.0 behaviour). When a request supplies its own effort,
+it always wins. When `WIRO_PRESET_OVERRIDES_SAMPLING=true` (default) the
+chosen preset's Wiro-recommended sampling also wins over the request body's
+`temperature`/`top_p`/etc. — flip it to `false` if you want the body values
+to win and only the thinking toggle to change.
+
+### Switching effort from the Codex REPL
+
+Inside a `codexw` (Codex CLI) session:
+
+```
+/model qwen/qwen3-8-27b-uncensored            # pick the Wiro model
+/reasoning-effort medium                      # switch thinking effort on the fly
+```
+
+Codex writes the choice into the request body, the gateway reads
+`body["reasoning"]["effort"]`, and the next request goes out with
+`enableThinking=true` and `reasoning_effort=medium`. The resolved config is
+echoed back in the response under `x_wiro` so you can verify what was sent.
+
+### Switching effort at the gateway (affects every request)
+
+Edit `.env`:
+
+```env
+WIRO_DEFAULT_REASONING_EFFORT=medium
+```
+
+Then `wiro-gateway install` (re-runs `bin/install-wrappers.sh` and writes the
+matching `default_reasoning_effort` into `~/.codex/wiro.config.toml`), or
+manually edit `~/.codex/wiro.config.toml` to keep Codex's profile in sync.
 
 ## Security
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env from the cwd, then from the package directory, so `wiro-gateway start`
@@ -20,6 +20,9 @@ for p in _env_candidates:
     if p.exists():
         load_dotenv(p, override=False)
         break
+
+
+_VALID_EFFORTS = ("none", "low", "medium", "high")
 
 
 class Settings(BaseSettings):
@@ -41,6 +44,36 @@ class Settings(BaseSettings):
     # Polling
     wiro_poll_interval_sec: float = Field(default=1.0, alias="WIRO_POLL_INTERVAL_SEC")
     wiro_poll_timeout_sec: int = Field(default=600, alias="WIRO_POLL_TIMEOUT_SEC")
+
+    # --- Reasoning effort (Wiro Qwen3.8-27B-Uncensored) ---
+    # Default effort used when a request body doesn't ask for one. Accepts
+    # none/low/medium/high (aliases: off/disabled/minimal/med/max/maximum).
+    wiro_default_reasoning_effort: str = Field(default="none", alias="WIRO_DEFAULT_REASONING_EFFORT")
+    # If true, the preset (low/medium/high) ALWAYS wins over the request body's
+    # own temperature/top_p/top_k/max_tokens. If false, request body wins and we
+    # only stamp the thinking toggles. Default true so the Wiro-recommended
+    # sampling actually applies when thinking is on.
+    wiro_preset_overrides_sampling: bool = Field(default=True, alias="WIRO_PRESET_OVERRIDES_SAMPLING")
+    # Fallback explicit toggle: when true, reasoning effort auto-enables
+    # enableThinking. When false, even effort=medium leaves thinking off
+    # (useful for fine-grained "I want reasoning_effort but no chain of thought").
+    wiro_enable_thinking_on_effort: bool = Field(default=True, alias="WIRO_ENABLE_THINKING_ON_EFFORT")
+
+    @field_validator("wiro_default_reasoning_effort")
+    @classmethod
+    def _validate_effort(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if s in _VALID_EFFORTS:
+            return s
+        alias_map = {
+            "off": "none", "disabled": "none",
+            "minimal": "low", "med": "medium", "max": "high", "maximum": "high",
+        }
+        if s in alias_map:
+            return alias_map[s]
+        raise ValueError(
+            f"WIRO_DEFAULT_REASONING_EFFORT must be one of {_VALID_EFFORTS} (got {v!r})"
+        )
 
     def require_credentials(self) -> None:
         """Raise if Wiro credentials are missing/look like placeholders."""

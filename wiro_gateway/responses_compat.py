@@ -16,6 +16,12 @@ then emit OpenAI-style SSE events:
 
 If `stream: false` (or omitted), we return a single JSON response in the same
 shape but with `object: "response"`.
+
+Reasoning support:
+  - `body["reasoning"]` (Codex Responses shape) is the canonical input.
+  - `body["reasoning_effort"]` is also accepted for OpenAI Chat-compat clients.
+  - Resolved effort is stamped on the Wiro Run call as `reasoning_effort=<...>`
+    plus `enableThinking=true|false` (see wiro_gateway.reasoning).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
 from .extract import extract_assistant_text
+from .reasoning import PRESETS, EffortLevel, apply_preset_to_wiro_params, resolve_effort
 from .wiro_to_params import merge_messages
 
 router = APIRouter()
@@ -41,7 +48,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TOP_P = 0.8
 
-# How many characters to send per delta. 16 chars ≈ a few words, which keeps
+# How many characters to send per delta. 16 chars ~= a few words, which keeps
 # the client progress bar smooth without flooding the wire.
 DELTA_CHARS = 16
 
@@ -75,28 +82,65 @@ def _input_to_messages(input_: Any, instructions: str | None) -> list[dict[str, 
     return msgs
 
 
-async def _run_wiro(client, model_path: str, messages: list[dict[str, Any]], body: dict[str, Any]) -> str:
+def _wiro_params_from_request(
+    body: dict[str, Any],
+    messages: list[dict[str, Any]],
+    settings: Settings,
+) -> tuple[dict[str, Any], EffortLevel]:
     system_prompt, prompt = merge_messages(messages, None)
-    wiro_params = {
-        "enableThinking": "false",
+    effort = resolve_effort(body, settings.wiro_default_reasoning_effort)
+    preset = PRESETS[effort]
+    override = settings.wiro_preset_overrides_sampling
+
+    temperature = float(body.get("temperature", preset.temperature if override else DEFAULT_TEMPERATURE))
+    top_p = float(body.get("top_p", preset.top_p if override else DEFAULT_TOP_P))
+    top_k_str = body.get("top_k", str(preset.top_k if override else 20))
+    top_k = int(top_k_str) if str(top_k_str).strip() else 20
+    max_tokens = int(
+        body.get("max_output_tokens")
+        or (preset.max_tokens if override else DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+
+    params: dict[str, Any] = {
         "prompt": prompt,
         "system_prompt": system_prompt or "",
-        "temperature": str(float(body.get("temperature", DEFAULT_TEMPERATURE))),
-        "top_p": str(float(body.get("top_p", DEFAULT_TOP_P))),
-        "top_k": "20",
+        "temperature": str(temperature),
+        "top_p": str(top_p),
+        "top_k": str(top_k),
         "repetition_penalty": "1.0",
         "length_penalty": "1",
-        "max_tokens": str(int(body.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)),
+        "max_tokens": str(max_tokens),
         "min_tokens": "0",
         "stop_sequences": "",
         "seed": "0",
         "do_sample": "--do_sample",
     }
+    params = apply_preset_to_wiro_params(params, preset, override_sampling=override)
+    return params, effort
+
+
+async def _run_wiro(
+    client,
+    model_path: str,
+    messages: list[dict[str, Any]],
+    body: dict[str, Any],
+    settings: Settings,
+) -> tuple[str, dict[str, Any], EffortLevel]:
+    wiro_params, effort = _wiro_params_from_request(body, messages, settings)
     payload = await client.run_until_done(model_path, wiro_params)
-    return extract_assistant_text(payload)
+    text = extract_assistant_text(payload)
+    return text, wiro_params, effort
 
 
-def _build_response(model: str, text: str, pt: int, ct: int) -> dict[str, Any]:
+def _build_response(
+    model: str,
+    text: str,
+    pt: int,
+    ct: int,
+    effort: EffortLevel,
+    wiro_params: dict[str, Any],
+) -> dict[str, Any]:
+    preset = PRESETS[effort]
     return {
         "id": f"resp_{uuid.uuid4().hex}",
         "object": "response",
@@ -113,6 +157,16 @@ def _build_response(model: str, text: str, pt: int, ct: int) -> dict[str, Any]:
         ],
         "output_text": text,
         "usage": {"input_tokens": pt, "output_tokens": ct, "total_tokens": pt + ct},
+        # Echo the resolved reasoning config so Codex / debuggers can inspect it.
+        "x_wiro": {
+            "effort": effort,
+            "enable_thinking": preset.enable_thinking,
+            "reasoning_effort": preset.reasoning_effort,
+            "applied_params": {
+                k: v for k, v in wiro_params.items()
+                if k in ("enableThinking", "reasoning_effort", "temperature", "top_p", "top_k", "max_tokens")
+            },
+        },
     }
 
 
@@ -120,7 +174,15 @@ def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
-async def _stream_response(model: str, text: str, pt: int, ct: int) -> AsyncIterator[bytes]:
+async def _stream_response(
+    model: str,
+    text: str,
+    pt: int,
+    ct: int,
+    effort: EffortLevel,
+    wiro_params: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    preset = PRESETS[effort]
     rid = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -131,7 +193,10 @@ async def _stream_response(model: str, text: str, pt: int, ct: int) -> AsyncIter
         "model": model,
     }
     # 1. created
-    yield _sse("response.created", {"type": "response.created", "response": {**base, "status": "in_progress", "output": []}})
+    yield _sse("response.created", {
+        "type": "response.created",
+        "response": {**base, "status": "in_progress", "output": []},
+    })
     # 2. output_item.added
     yield _sse("response.output_item.added", {
         "type": "response.output_item.added",
@@ -200,6 +265,11 @@ async def _stream_response(model: str, text: str, pt: int, ct: int) -> AsyncIter
         ],
         "output_text": text,
         "usage": {"input_tokens": pt, "output_tokens": ct, "total_tokens": pt + ct},
+        "x_wiro": {
+            "effort": effort,
+            "enable_thinking": preset.enable_thinking,
+            "reasoning_effort": preset.reasoning_effort,
+        },
     }
     yield _sse("response.completed", {"type": "response.completed", "response": final})
     # 9. terminator
@@ -222,7 +292,7 @@ async def responses(request: Request):
         raise HTTPException(status_code=400, detail="`input` must be a non-empty string or list")
 
     try:
-        text = await _run_wiro(client, settings.wiro_model, messages, body)
+        text, wiro_params, effort = await _run_wiro(client, settings.wiro_model, messages, body, settings)
     except HTTPException:
         raise
     except Exception as exc:
@@ -233,7 +303,7 @@ async def responses(request: Request):
 
     if body.get("stream"):
         return StreamingResponse(
-            _stream_response(model, text, pt, ct),
+            _stream_response(model, text, pt, ct, effort, wiro_params),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -241,4 +311,4 @@ async def responses(request: Request):
                 "Connection": "keep-alive",
             },
         )
-    return JSONResponse(_build_response(model, text, pt, ct))
+    return JSONResponse(_build_response(model, text, pt, ct, effort, wiro_params))

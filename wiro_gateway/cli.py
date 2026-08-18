@@ -98,8 +98,15 @@ def init(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    full: bool = typer.Option(
+        False, "--full",
+        help="Also run a tiny ping for each reasoning effort (low/medium/high). Slower.",
+    ),
+) -> None:
     """Verify config + a tiny Run call against Wiro. Stops on first failure."""
+    from .reasoning import PRESETS, all_presets, describe_effort
+
     s = get_settings()
     table = Table(title="wiro-gateway doctor", show_lines=False)
     table.add_column("Check", style="bold")
@@ -113,9 +120,41 @@ def doctor() -> None:
         console.print(table)
         raise typer.Exit(1)
 
+    # Surface the reasoning defaults so misconfig is obvious in one glance.
+    table.add_row(
+        "Reasoning default",
+        "[cyan]" + s.wiro_default_reasoning_effort + "[/cyan]",
+        describe_effort(s.wiro_default_reasoning_effort),  # type: ignore[arg-type]
+    )
+    table.add_row(
+        "Preset overrides sampling",
+        "[cyan]" + ("yes" if s.wiro_preset_overrides_sampling else "no") + "[/cyan]",
+        "low/medium/high Wiro preset wins over request-body temperature/top_p"
+        if s.wiro_preset_overrides_sampling
+        else "request-body temperature/top_p wins over preset",
+    )
+
+    # Compact table of the four supported efforts + their Wiro params.
+    sub = Table(title="Reasoning presets", show_lines=False)
+    sub.add_column("Effort", style="bold")
+    sub.add_column("enableThinking")
+    sub.add_column("reasoning_effort")
+    sub.add_column("temp / top_p / top_k")
+    sub.add_column("max_tokens")
+    for level, preset in all_presets():
+        sub.add_row(
+            level,
+            "true" if preset.enable_thinking else "false",
+            preset.reasoning_effort or "—",
+            f"{preset.temperature} / {preset.top_p} / {preset.top_k}",
+            str(preset.max_tokens),
+        )
+
     import asyncio
     import httpx
     from .auth import auth_headers
+    from .client import WiroClient
+
     headers = auth_headers(s.wiro_api_key, s.wiro_api_secret)
     try:
         with httpx.Client(timeout=15.0) as c:
@@ -133,12 +172,63 @@ def doctor() -> None:
         else:
             table.add_row("Wiro Run", "[red]fail[/red]", f"HTTP {r.status_code}: {r.text[:200]}")
             console.print(table)
+            console.print(sub)
             raise typer.Exit(1)
     except Exception as exc:
         table.add_row("Wiro Run", "[red]fail[/red]", str(exc))
         console.print(table)
+        console.print(sub)
         raise typer.Exit(1)
+
     console.print(table)
+    console.print(sub)
+
+    if full:
+        # Run a tiny ping for each effort that turns thinking on, so we prove
+        # `enableThinking=true` + `reasoning_effort=<x>` are accepted by Wiro.
+        eff_table = Table(title="Per-effort ping (--full)", show_lines=False)
+        eff_table.add_column("Effort", style="bold")
+        eff_table.add_column("Result")
+        eff_table.add_column("Detail")
+        asyncio.run(_ping_each_effort(s, eff_table))
+        console.print(eff_table)
+
+
+async def _ping_each_effort(s, eff_table: Table) -> None:
+    from .reasoning import PRESETS
+    from .client import WiroClient
+
+    client = WiroClient(s)
+    try:
+        for level in ("low", "medium", "high"):
+            preset = PRESETS[level]
+            params = {
+                "prompt": "ping",
+                "system_prompt": "",
+                "temperature": str(preset.temperature),
+                "top_p": str(preset.top_p),
+                "top_k": str(preset.top_k),
+                "repetition_penalty": "1.0",
+                "length_penalty": "1",
+                "max_tokens": "8",
+                "min_tokens": "0",
+                "stop_sequences": "",
+                "seed": "0",
+                "do_sample": "--do_sample",
+                "enableThinking": "true" if preset.enable_thinking else "false",
+                "reasoning_effort": preset.reasoning_effort,
+            }
+            try:
+                payload = await client.run_until_done(s.wiro_model, params)
+                task = (payload.get("tasklist") or [{}])[0]
+                eff_table.add_row(
+                    level, "[green]ok[/green]",
+                    f"status={task.get('status')} enableThinking={params['enableThinking']} reasoning_effort={params['reasoning_effort']}",
+                )
+            except Exception as exc:
+                eff_table.add_row(level, "[red]fail[/red]", str(exc))
+    finally:
+        await client.aclose()
 
 
 @app.command()
