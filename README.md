@@ -1,5 +1,14 @@
 # wiro-gateway
 
+> **Unofficial, third-party project.**
+> Not affiliated with, endorsed by, sponsored by, or supported by
+> **OpenAI** (makers of Codex CLI) or **Wiro** (wiro.ai, the model host).
+> All product names, trademarks, and registered trademarks are property
+> of their respective owners. Use at your own risk; no warranty is provided.
+> If you need a supported experience, use the official
+> [Codex CLI](https://github.com/openai/codex) with OpenAI's own backend
+> and/or [Wiro](https://wiro.ai)'s own product.
+
 > Use [Qwen 3.8 27B Uncensored](https://wiro.ai/models/qwen/qwen3-8-27b-uncensored)
 > — an open-source 27B-parameter model hosted on [Wiro](https://wiro.ai) —
 > as a drop-in backend for **Codex CLI** (and a few other clients).
@@ -16,6 +25,34 @@ refactor this file please
 codex
 ...
 ```
+
+## Disclaimer (please read)
+
+- **Unofficial.** This repository is a personal, third-party project. It is
+  **not** built, maintained, audited, or supported by **OpenAI** (the
+  company behind Codex CLI) or by **Wiro** (the company behind wiro.ai
+  and the Qwen 3.8 27B Uncensored model). No one at OpenAI or Wiro has
+  reviewed this code.
+- **Trademarks.** "Codex", "Codex CLI", and the OpenAI name and logo are
+  trademarks of OpenAI. "Wiro", "wiro.ai", and the Qwen 3.8 27B
+  Uncensored model card are trademarks / model artifacts of their
+  respective owners. Their appearance here is purely descriptive and
+  does not imply any partnership, endorsement, or sponsorship.
+- **No warranty.** This software is provided "as is", without any
+  warranty of any kind. You are responsible for what you run, for the
+  API key and secret you paste into the installer, for the requests
+  that flow through the gateway, and for any charges Wiro bills to
+  your account. The author(s) of this project bear no liability for
+  data loss, billing, or any other consequence of using it.
+- **Security.** The gateway listens on `127.0.0.1` only and is meant
+  for single-user local use. Do **not** expose it to a network -- your
+  Wiro secret would leak.
+- **Upstream risk.** Wiro is the system of record for the model. If
+  Wiro's model is down, returns errors, rate-limits you, or otherwise
+  misbehaves, that is between you and Wiro, not with this gateway.
+- **For production / supported use**, please use the official
+  [Codex CLI](https://github.com/openai/codex) and the official
+  [Wiro dashboard](https://wiro.ai/panel).
 
 ## What is this?
 
@@ -249,3 +286,23 @@ pytest tests/ -v        # 22 cases, all offline
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Limitations
+
+- **Reverse-engineered / best-effort Codex compatibility.** The
+  `/v1/responses` streaming and `/v1/models` shapes were derived from
+  inspecting the Codex CLI binary (`@openai/codex-linux-x64`) and
+  reading its source on GitHub. They are *not* a published OpenAI
+  spec, and OpenAI may change the wire format in any Codex release
+  without notice. If Codex updates break this gateway, that is
+  expected, not a bug in Wiro or OpenAI.
+- **Qwen 3.8 27B Uncensored is not GPT-5.** It is an open-source
+  27B-parameter model. Codex's system prompts and tool-calling
+  assumptions were designed for GPT-5, so behaviour with a different
+  model may differ (shorter answers, more "ready for the task" empty
+  confirmations, occasional refusals on uncensored content, etc.).
+- **No tool calls.** Wiro's `Run/<model>` endpoint returns plain
+  text. Codex tool calls (apply_patch, web_search, ...) are not
+  forwarded to Wiro. If you need tool-calling, this gateway is the
+  wrong tool.
+
